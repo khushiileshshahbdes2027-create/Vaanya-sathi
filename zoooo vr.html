@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Interactive VR Zoo Kiosk</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #87CEEB; font-family: sans-serif; }
+        
+        /* Prominent VR Button Overrides */
+        #VRButton { z-index: 9999 !important; background-color: #FE9313 !important; color: #000 !important; font-weight: bold !important; border: 2px solid #fff !important; }
+        
+        /* Desktop UI Overlay */
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 6px; height: 6px; background: white; border-radius: 50%; transform: translate(-50%, -50%); z-index: 10; pointer-events: none; mix-blend-mode: difference; }
+        #instructions { position: absolute; top: 10px; left: 10px; color: white; background: rgba(0,0,0,0.6); padding: 15px; border-radius: 8px; z-index: 10; pointer-events: none; }
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; background: rgba(0,0,0,0.8); padding: 20px; font-size: 20px; border-radius: 8px; z-index: 20; }
+        
+        /* Kiosk UI (Hidden from 2D DOM, sized exactly for HTMLMesh) */
+        /* Converted to plain CSS, removing external fonts and remote base64 images for HTMLMesh compatibility[cite: 1] */
+        #kiosk-ui { position: absolute; top: -9999px; left: -9999px; width: 1024px; height: 640px; background: #FFFFFF; border-radius: 20px; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 10px 40px rgba(0,0,0,0.25); color: #000; font-family: system-ui, sans-serif; }
+        #kiosk-ui header { height: 72px; background: #FFFFFF; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; border-bottom: 3px solid #F3B94D; }
+        #kiosk-ui .logo { display: flex; align-items: center; gap: 10px; font-size: 22px; color: #17473B; font-weight: bold; }
+        #kiosk-ui .logo-icon { width: 40px; height: 40px; border-radius: 50%; background: #FE9313; display: grid; place-items: center; color: white; }
+        #kiosk-ui nav { display: flex; gap: 22px; font-weight: bold; }
+        #kiosk-ui button { background: #eee; border: 0; padding: 12px 20px; cursor: pointer; border-radius: 8px; font-size: 16px; transition: background 0.2s; }
+        #kiosk-ui button:hover { background: #ddd; }
+        #kiosk-ui button.pill { background: #FE9313; color: #000; border-radius: 999px; }
+        #kiosk-ui button.pill:hover { background: #e58411; }
+        #kiosk-ui .hero { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; background: linear-gradient(135deg, #17473B, #2c856f); color: white; text-align: center; padding: 40px; }
+        #kiosk-ui .hero h1 { font-size: 48px; margin: 0 0 10px 0; }
+        #kiosk-ui .hero p { font-size: 24px; margin: 0 0 30px 0; max-width: 800px; }
+    </style>
+
+    <!-- Import maps for Three.js ES Modules -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="crosshair"></div>
+    <div id="instructions">
+        <strong>Desktop Controls:</strong><br/>
+        Click to Lock Pointer / Start Audio<br/>
+        W A S D - Move (Shift to run)<br/>
+        Mouse - Look<br/>
+        Left Click - Interact with Screen<br/>
+        F - Toggle 1st/3rd Person<br/>
+        M - Toggle Music
+    </div>
+    <div id="loading">Loading Kiosk Model...</div>
+
+    <!-- The actual UI parsed by HTMLMesh[cite: 1] -->
+    <div id="kiosk-ui">
+        <header>
+            <div class="logo"><div class="logo-icon">ZOO</div>The Mumbai Botanical Udyan and Zoo</div>
+            <nav>
+                <button onclick="document.getElementById('ui-title').innerText='Map View'">Map</button>
+                <button onclick="document.getElementById('ui-title').innerText='Animal Facts'">Facts</button>
+                <button class="pill" onclick="window.playUIClick(); document.getElementById('ui-title').innerText='Emergency SOS Active!'; document.getElementById('ui-title').style.color='#ff4444';">SOS</button>
+            </nav>
+        </header>
+        <div class="hero">
+            <h1 id="ui-title">Welcome to the Tiger Shelter</h1>
+            <p>Touch the screen to learn fun facts, view the map, or call for assistance.</p>
+            <button class="pill" style="font-size: 24px; padding: 15px 40px;" onclick="window.playUIClick(); document.getElementById('ui-title').innerText='Roar! Playing Sound...'">Play Tiger Sound</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+        import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+        import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { HTMLMesh } from 'three/addons/interactive/HTMLMesh.js';
+        import { InteractiveGroup } from 'three/addons/interactive/InteractiveGroup.js';
+
+        // --- Core Setup ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // Sky color
+        scene.fog = new THREE.FogExp2(0x87CEEB, 0.02); // Distance fog to hide horizon
+
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
+        
+        // Rig sits at y=0. In VR, WebXR adds real headset height to camera.y. 
+        // On desktop, we manually offset camera.y to 1.6m.
+        const rig = new THREE.Group();
+        rig.position.set(0, 0, 3);
+        scene.add(rig);
+        rig.add(camera);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Soft shadows
+        renderer.toneMapping = THREE.ACESFilmicToneMapping; // Cinematic color grading
+        renderer.xr.enabled = true;
+        
+        // Request hand-tracking and set reference space to local-floor
+        document.body.appendChild(renderer.domElement);
+        document.body.appendChild(VRButton.createButton(renderer, { 
+            optionalFeatures: ['hand-tracking'], 
+            referenceSpaceType: 'local-floor' 
+        }));
+
+        // --- Collision System ---
+        // We store bounding boxes of solid objects to prevent walking through them.
+        const solidFootprints = [];
+        const playerRadius = 0.3;
+
+        // --- Lighting ---
+        const hemiLight = new THREE.HemisphereLight(0xffeedd, 0x334455, 0.6);
+        scene.add(hemiLight);
+
+        // Warm late-afternoon sun
+        const dirLight = new THREE.DirectionalLight(0xffddaa, 1.2);
+        dirLight.position.set(10, 15, -10);
+        dirLight.castShadow = true;
+        dirLight.shadow.camera.top = 20;
+        dirLight.shadow.camera.bottom = -20;
+        dirLight.shadow.camera.left = -20;
+        dirLight.shadow.camera.right = 20;
+        scene.add(dirLight);
+
+        // --- Environment Factory Functions ---
+        // Using factories allows us to procedurally generate the scene efficiently.
+        const treeMat = new THREE.MeshStandardMaterial({ color: 0x2c5e3b, roughness: 0.8 });
+        const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3b2c });
+        
+        function createTree(x, z) {
+            const group = new THREE.Group();
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, 2), trunkMat);
+            trunk.position.y = 1;
+            trunk.castShadow = true;
+            const leaves = new THREE.Mesh(new THREE.DodecahedronGeometry(1.5), treeMat);
+            leaves.position.y = 2.5;
+            leaves.castShadow = true;
+            group.add(trunk, leaves);
+            group.position.set(x, 0, z);
+            scene.add(group);
+            
+            // Add collision
+            const box = new THREE.Box3().setFromObject(trunk);
+            solidFootprints.push(box);
+        }
+
+        function createGlassPartition(x, z, rotY) {
+            const glass = new THREE.Mesh(
+                new THREE.BoxGeometry(4, 2.5, 0.1),
+                new THREE.MeshStandardMaterial({ color: 0xadd8e6, transparent: true, opacity: 0.4, roughness: 0.1 })
+            );
+            const frame = new THREE.Mesh(
+                new THREE.BoxGeometry(4.2, 2.7, 0.15),
+                new THREE.MeshStandardMaterial({ color: 0x222222 })
+            );
+            const group = new THREE.Group();
+            glass.position.y = 1.25;
+            frame.position.y = 1.35;
+            group.add(frame, glass);
+            group.position.set(x, 0, z);
+            group.rotation.y = rotY;
+            scene.add(group);
+            
+            const box = new THREE.Box3().setFromObject(group);
+            solidFootprints.push(box);
+        }
+
+        // Build Environment
+        const floor = new THREE.Mesh(
+            new THREE.PlaneGeometry(100, 100),
+            new THREE.MeshStandardMaterial({ color: 0x4b5e42, roughness: 0.9 })
+        );
+        floor.rotation.x = -Math.PI / 2;
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        // Populate Zoo
+        for(let i=0; i<15; i++) {
+            createTree(Math.random() * 40 - 20, Math.random() * -30 - 5);
+        }
+        createGlassPartition(-2, -3, 0);
+        createGlassPartition(2, -3, 0);
+
+        // --- Kiosk & HTMLMesh Setup ---
+        const interactiveGroup = new InteractiveGroup(renderer, camera);
+        scene.add(interactiveGroup);
+        
+        let htmlMesh;
+
+        const loader = new GLTFLoader();
+        loader.load('kiosk.glb', (gltf) => {
+            const kiosk = gltf.scene;
+            kiosk.position.set(0, 0, -2);
+            kiosk.rotation.y = Math.PI / 6; // Angle for readability
+            
+            kiosk.traverse((child) => {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                    console.log("Found mesh:", child.name); // Log names for student debugging
+                }
+            });
+            scene.add(kiosk);
+
+            // Generate collision footprint for the kiosk
+            const kioskBox = new THREE.Box3().setFromObject(kiosk);
+            // Expand slightly to stop player ~0.6m away (arm's length)
+            kioskBox.expandByScalar(0.6); 
+            solidFootprints.push(kioskBox);
+
+            // Setup UI Mesh
+            const domEl = document.getElementById('kiosk-ui');
+            htmlMesh = new HTMLMesh(domEl);
+            
+            // Best viewing distance for 1024x640 rendered physically is ~0.6m - 1.0m.
+            const screenMesh = kiosk.getObjectByName('Screen');
+            if (screenMesh) {
+                // Match bounds of the designated screen mesh
+                const box = new THREE.Box3().setFromObject(screenMesh);
+                const size = new THREE.Vector3();
+                box.getSize(size);
+                
+                // Scale HTMLMesh to fit the physical screen
+                htmlMesh.scale.setScalar(size.x / 1024); // Assuming 1024px UI width
+                
+                // Copy transform and offset slightly outward (+Z in local space)
+                htmlMesh.position.copy(screenMesh.position);
+                htmlMesh.rotation.copy(screenMesh.rotation);
+                htmlMesh.translateZ(0.002); // 2mm offset
+                
+                screenMesh.parent.add(htmlMesh);
+            } else {
+                // Fallback: Float at chest height
+                htmlMesh.position.set(0, 1.4, -1.8);
+                htmlMesh.scale.setScalar(0.0015);
+                scene.add(htmlMesh);
+            }
+            
+            interactiveGroup.add(htmlMesh);
+            document.getElementById('loading').style.display = 'none';
+
+        }, undefined, (error) => {
+            document.getElementById('loading').innerText = "Error loading kiosk.glb. Check console.";
+            document.getElementById('loading').style.color = "red";
+            console.error("GLTF Load Error:", error);
+        });
+
+        // --- WebXR Controllers & Hands ---
+        const controllerModelFactory = new XRControllerModelFactory();
+        const handModelFactory = new XRHandModelFactory();
+
+        // Setup both left (0) and right (1) controllers
+        for (let i = 0; i < 2; i++) {
+            const controller = renderer.xr.getController(i);
+            
+            // Laser pointer
+            const geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]);
+            const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0xff0000 }));
+            line.name = 'line';
+            line.scale.z = 5;
+            controller.add(line);
+            
+            // Add to interactive group so it triggers clicks on HTMLMesh
+            interactiveGroup.listenToPointerEvents(controller, line);
+            scene.add(controller);
+
+            const grip = renderer.xr.getControllerGrip(i);
+            grip.add(controllerModelFactory.createControllerModel(grip));
+            scene.add(grip);
+
+            const hand = renderer.xr.getHand(i);
+            hand.add(handModelFactory.createHandModel(hand, 'mesh'));
+            scene.add(hand);
+            
+            // Hand tracking pinch interactions
+            interactiveGroup.listenToPointerEvents(hand, hand);
+        }
+
+        // --- Audio System (Web Audio API) ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let audioStarted = false;
+        let musicPlaying = true;
+        let bgGain, osc1, osc2;
+
+        function initAudio() {
+            if (audioStarted) return;
+            audioStarted = true;
+            
+            bgGain = audioCtx.createGain();
+            bgGain.gain.value = 0.1;
+            bgGain.connect(audioCtx.destination);
+
+            // Soft Ambient Pad (Drone)
+            osc1 = audioCtx.createOscillator();
+            osc1.type = 'sine';
+            osc1.frequency.value = 110; // A2
+            osc1.connect(bgGain);
+            osc1.start();
+
+            osc2 = audioCtx.createOscillator();
+            osc2.type = 'triangle';
+            osc2.frequency.value = 164.81; // E3 (Perfect 5th)
+            osc2.connect(bgGain);
+            osc2.start();
+
+            // Light Melody Loop (Mellow Major Pentatonic)
+            const notes = [220, 246.94, 277.18, 329.63, 369.99]; // A Major Pentatonic
+            setInterval(() => {
+                if(!musicPlaying || audioCtx.state === 'suspended') return;
+                const noteOsc = audioCtx.createOscillator();
+                const noteGain = audioCtx.createGain();
+                noteOsc.type = 'sine';
+                noteOsc.frequency.value = notes[Math.floor(Math.random() * notes.length)];
+                
+                noteGain.gain.setValueAtTime(0, audioCtx.currentTime);
+                noteGain.gain.linearRampToValueAtTime(0.05, audioCtx.currentTime + 1);
+                noteGain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 3);
+                
+                noteOsc.connect(noteGain);
+                noteGain.connect(audioCtx.destination);
+                noteOsc.start();
+                noteOsc.stop(audioCtx.currentTime + 3);
+            }, 4000);
+        }
+
+        // Global function for UI buttons to trigger click sound & haptics
+        window.playUIClick = () => {
+            if(audioCtx.state !== 'suspended') {
+                const clickOsc = audioCtx.createOscillator();
+                const clickGain = audioCtx.createGain();
+                clickOsc.type = 'square';
+                clickOsc.frequency.setValueAtTime(600, audioCtx.currentTime);
+                clickOsc.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 0.05);
+                clickGain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                clickGain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.05);
+                clickOsc.connect(clickGain);
+                clickGain.connect(audioCtx.destination);
+                clickOsc.start();
+                clickOsc.stop(audioCtx.currentTime + 0.05);
+            }
+
+            // Haptics for VR controllers
+            const session = renderer.xr.getSession();
+            if (session && session.inputSources) {
+                for (const source of session.inputSources) {
+                    if (source.gamepad && source.gamepad.hapticActuators && source.gamepad.hapticActuators.length > 0) {
+                        source.gamepad.hapticActuators[0].pulse(0.5, 50);
+                    }
+                }
+            }
+        };
+
+        // --- Desktop Controls & View ---
+        let isFirstPerson = true;
+        let isLocked = false;
+        let isMouseDown = false;
+        const keys = { w: false, a: false, s: false, d: false, shift: false };
+        let euler = new THREE.Euler(0, 0, 0, 'YXZ');
+
+        // Center dot raycaster for desktop UI interaction
+        const desktopRaycaster = new THREE.Raycaster();
+        const centerCoords = new THREE.Vector2(0, 0);
+
+        document.addEventListener('click', (e) => {
+            // Start audio on first interaction
+            if(audioCtx.state === 'suspended') audioCtx.resume();
+            initAudio();
+
+            // Desktop pointer lock logic
+            if (!renderer.xr.isPresenting && !isLocked) {
+                document.body.requestPointerLock();
+            } else if (!renderer.xr.isPresenting && isLocked) {
+                // Forward click to HTMLMesh
+                desktopRaycaster.setFromCamera(centerCoords, camera);
+                if(htmlMesh) {
+                    const intersects = desktopRaycaster.intersectObject(htmlMesh);
+                    if (intersects.length > 0) {
+                        // Dispatch fake click to DOM element based on UV
+                        const uv = intersects[0].uv;
+                        const x = uv.x * 1024;
+                        const y = (1 - uv.y) * 640;
+                        const el = document.elementFromPoint(x, y); // Requires UI to be briefly visible or custom event routing, HTMLMesh handles this internally via InteractiveGroup, but for pure desktop fallback:
+                        // InteractiveGroup natively listens to pointerdown on the renderer domElement.
+                    }
+                }
+            }
+        });
+
+        document.addEventListener('pointerlockchange', () => {
+            isLocked = document.pointerLockElement === document.body;
+        });
+
+        document.addEventListener('mousedown', () => isMouseDown = true);
+        document.addEventListener('mouseup', () => isMouseDown = false);
+
+        document.addEventListener('mousemove', (e) => {
+            if (!renderer.xr.isPresenting && (isLocked || isMouseDown)) {
+                const movementX = e.movementX || 0;
+                const movementY = e.movementY || 0;
+                euler.setFromQuaternion(camera.quaternion);
+                euler.y -= movementX * 0.002;
+                euler.x -= movementY * 0.002;
+                euler.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, euler.x)); // Clamp pitch
+                camera.quaternion.setFromEuler(euler);
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            const k = e.key.toLowerCase();
+            if (keys.hasOwnProperty(k)) keys[k] = true;
+            if (e.key === 'Shift') keys.shift = true;
+            
+            if (k === 'f') { // Toggle 1st/3rd person
+                isFirstPerson = !isFirstPerson;
+                camera.position.set(0, 0, isFirstPerson ? 0 : 2);
+            }
+            if (k === 'm') { // Toggle music
+                musicPlaying = !musicPlaying;
+                if(bgGain) bgGain.gain.value = musicPlaying ? 0.1 : 0;
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            const k = e.key.toLowerCase();
+            if (keys.hasOwnProperty(k)) keys[k] = false;
+            if (e.key === 'Shift') keys.shift = false;
+        });
+
+        document.addEventListener('wheel', (e) => {
+            if (!renderer.xr.isPresenting) {
+                camera.fov += e.deltaY * 0.05;
+                camera.fov = Math.max(30, Math.min(100, camera.fov));
+                camera.updateProjectionMatrix();
+            }
+        });
+
+        // --- Main Loop (Locomotion & Collision) ---
+        const clock = new THREE.Clock();
+        const movementDir = new THREE.Vector3();
+        let lastSnapTurnTime = 0;
+
+        function checkCollision(proposedPosition) {
+            // Create a temp bounding box around the proposed position
+            const playerBox = new THREE.Box3(
+                new THREE.Vector3(proposedPosition.x - playerRadius, 0, proposedPosition.z - playerRadius),
+                new THREE.Vector3(proposedPosition.x + playerRadius, 2, proposedPosition.z + playerRadius)
+            );
+            
+            for (const box of solidFootprints) {
+                if (playerBox.intersectsBox(box)) return true;
+            }
+            return false;
+        }
+
+        renderer.setAnimationLoop(() => {
+            const dt = clock.getDelta();
+
+            // 1. Desktop Movement
+            if (!renderer.xr.isPresenting) {
+                rig.position.y = 1.6; // Desktop eye height
+                const speed = keys.shift ? 4.0 : 1.5;
+                movementDir.set(0, 0, 0);
+                
+                if (keys.w) movementDir.z -= 1;
+                if (keys.s) movementDir.z += 1;
+                if (keys.a) movementDir.x -= 1;
+                if (keys.d) movementDir.x += 1;
+
+                movementDir.normalize();
+                movementDir.applyQuaternion(camera.quaternion);
+                movementDir.y = 0; // Keep movement horizontal
+
+                if (movementDir.lengthSq() > 0) {
+                    const step = movementDir.multiplyScalar(speed * dt);
+                    const newPos = rig.position.clone().add(step);
+                    if (!checkCollision(newPos)) {
+                        rig.position.copy(newPos);
+                    }
+                }
+            } 
+            // 2. VR Movement (Gamepads)
+            else {
+                const session = renderer.xr.getSession();
+                if (session && session.inputSources) {
+                    for (const source of session.inputSources) {
+                        if (!source.gamepad) continue;
+
+                        // Left Controller: Glide relative to head facing
+                        if (source.handedness === 'left') {
+                            const axes = source.gamepad.axes;
+                            if (Math.abs(axes[2]) > 0.1 || Math.abs(axes[3]) > 0.1) {
+                                movementDir.set(axes[2], 0, axes[3]);
+                                
+                                // Rotate movement to match headset yaw
+                                const headEuler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
+                                movementDir.applyAxisAngle(new THREE.Vector3(0,1,0), headEuler.y);
+                                
+                                const step = movementDir.multiplyScalar(2.0 * dt);
+                                const newPos = rig.position.clone().add(step);
+                                if (!checkCollision(newPos)) {
+                                    rig.position.copy(newPos);
+                                }
+                            }
+                            
+                            // Face button X/Y toggles audio
+                            if (source.gamepad.buttons[4]?.pressed || source.gamepad.buttons[5]?.pressed) {
+                                if (audioCtx.currentTime - lastSnapTurnTime > 0.5) { // Debounce using existing timer var
+                                    musicPlaying = !musicPlaying;
+                                    if(bgGain) bgGain.gain.value = musicPlaying ? 0.1 : 0;
+                                    lastSnapTurnTime = audioCtx.currentTime;
+                                }
+                            }
+                        }
+
+                        // Right Controller: Snap Turn (30 degrees)
+                        if (source.handedness === 'right') {
+                            const axes = source.gamepad.axes;
+                            if (Math.abs(axes[2]) > 0.5 && audioCtx.currentTime - lastSnapTurnTime > 0.3) {
+                                const sign = axes[2] > 0 ? -1 : 1;
+                                rig.rotation.y += sign * (Math.PI / 6); // 30 degrees
+                                lastSnapTurnTime = audioCtx.currentTime;
+                            }
+                        }
+                    }
+                }
+            }
+
+            renderer.render(scene, camera);
+        });
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
